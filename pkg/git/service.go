@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +32,7 @@ const (
 
 type RepoSettings struct {
 	URL         string
+	SSHKeyPath  string
 	Branch      string
 	LocalGitDir string
 }
@@ -57,6 +60,17 @@ func NewRepo(repoSettings RepoSettings) (Repo, error) {
 		Mutex:    sync.Mutex{},
 	}
 
+	if repoSettings.SSHKeyPath != "" {
+		if strings.HasPrefix(repoSettings.URL, "https://") {
+			return nil, errors.New("Cannot use both an https git url and specify an SSH key. Either use an SSH url or remove the key")
+		}
+
+		_, err := os.Stat(repoSettings.SSHKeyPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "Error reading ssh key")
+		}
+	}
+
 	err := repo.init()
 	if err != nil {
 		return nil, err
@@ -74,8 +88,7 @@ func (repo *repo) Commit(message string, files []core.ResourceFile) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"commit", "-m", message, "--author", fmt.Sprintf("%s <%s>", commitName, commitEmail)}
-	err = repo.execGitCmd(args)
+	err = repo.execGitCmd("commit", "-m", message, "--author", fmt.Sprintf("%s <%s>", commitName, commitEmail))
 	if err != nil && isNoChangesErr(err) {
 		return ErrNoChanges
 	}
@@ -83,13 +96,11 @@ func (repo *repo) Commit(message string, files []core.ResourceFile) error {
 }
 
 func (repo *repo) addAll() error {
-	args := []string{"add", "--all"}
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("add", "--all")
 }
 
 func (repo *repo) Push() error {
-	args := []string{"push"}
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("push")
 }
 
 func (repo *repo) init() error {
@@ -120,26 +131,16 @@ func (repo *repo) init() error {
 }
 
 func (repo *repo) clone() error {
-	args := []string{"clone"}
-	// Only clone what we need to improve perf
-	args = append(args, "--branch", repo.settings.Branch)
-	args = append(args, "--single-branch")
-	args = append(args, "--depth=1")
-
-	args = append(args, repo.settings.URL, repo.settings.LocalGitDir)
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("clone", "--branch", repo.settings.Branch, "--single-branch", "--depth=1", repo.settings.URL, repo.settings.LocalGitDir)
 }
 
 func (repo *repo) fetch() error {
-	args := []string{"fetch", "-f", remoteName, repo.settings.Branch}
-
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("fetch", "-f", remoteName, repo.settings.Branch)
 }
 
 func (repo *repo) clean() error {
-	args := []string{"clean", "-xdf"}
 
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("clean", "-xdf")
 }
 
 // ResetHardRemote ensures that the remote is up-to-date. Pending commits will be lost.
@@ -149,21 +150,24 @@ func (repo *repo) ResetHardRemote() error {
 	if err != nil {
 		return err
 	}
-	args := []string{"reset", "--hard", fmt.Sprintf("%s/%s", remoteName, repo.settings.Branch)}
 
-	return repo.execGitCmd(args)
+	return repo.execGitCmd("reset", "--hard", fmt.Sprintf("%s/%s", remoteName, repo.settings.Branch))
 }
 
-func (repo *repo) execGitCmd(args []string) error {
+func (repo *repo) execGitCmd(args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitExecTimeoutSeconds)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repo.settings.LocalGitDir
-
+	cmd := repo.buildGitCmd(ctx, args...)
 	_, err := execWithContext(ctx, cmd)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("git %s", args))
 	}
 
 	return nil
+}
+
+func (repo *repo) buildGitCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repo.settings.LocalGitDir
+	return cmd
 }

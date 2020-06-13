@@ -59,6 +59,7 @@ func main() {
 		URL:         rc.GitUrl,
 		Branch:      rc.GitBranch,
 		LocalGitDir: rc.GitDir,
+		SSHKeyPath:  rc.GitSSHKeyPath,
 	}
 
 	repo, err := git.NewRepo(repoSettings)
